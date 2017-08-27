@@ -10,6 +10,8 @@ import akka.http.scaladsl.model.HttpMethods
 import akka.http.scaladsl.model.HttpRequest
 import akka.http.scaladsl.model.Uri
 import akka.stream.ActorMaterializer
+import com.sun.net.httpserver.HttpExchange
+import com.sun.net.httpserver.HttpHandler
 import com.sun.net.httpserver.HttpServer
 
 import scala.util.Failure
@@ -28,28 +30,30 @@ object Issue1245 {
 
   def main(args: Array[String]): Unit = {
 
-    // Setup a server, to minimize noise in the logs we do not use akka-http for the
-    // server side.
+    // to minimize noise in the logs, we do not use akka-http for the server side
     val count = new AtomicInteger()
     val server = HttpServer.create(new InetSocketAddress(0), 100)
     val port = server.getAddress.getPort
-    server.createContext("/test", exchange => {
-      val i = count.incrementAndGet()
-      println(s"server received request $i")
-      ignore(exchange.getRequestBody)
 
-      // By alternating between fast and slow responses we make it more likely the pool
-      // will get shutdown just after a request has gone out with a slow response.
-      if (i % 2 == 0) Thread.sleep(1000L)
-      exchange.sendResponseHeaders(200, -1L)
-      exchange.close()
-      println(s"server sent response $i")
-    })
+    val handler = new HttpHandler {
+      override def handle(exchange: HttpExchange): Unit = {
+        val i = count.incrementAndGet()
+        println(s"server received request $i")
+        ignore(exchange.getRequestBody)
+
+        if (i % 2 == 0) Thread.sleep(1000L)
+        exchange.sendResponseHeaders(200, -1L)
+        exchange.close()
+        println(s"server sent response $i")
+      }
+    }
+
+    server.createContext("/test", handler)
     server.start()
 
     import scala.concurrent.ExecutionContext.Implicits.global
-    implicit val system = ActorSystem()
-    implicit val materializer = ActorMaterializer()
+    implicit val system: ActorSystem = ActorSystem()
+    implicit val mat: ActorMaterializer = ActorMaterializer()
 
     val uri = Uri(s"http://localhost:$port/test")
     val request = HttpRequest(HttpMethods.GET, uri)
@@ -60,6 +64,7 @@ object Issue1245 {
       if (!requestInProgress) {
         requestInProgress = true
         startTime = System.currentTimeMillis()
+
         Http().singleRequest(request)
           .andThen {
             case _ => requestInProgress = false
@@ -71,13 +76,12 @@ object Issue1245 {
             case Failure(t) =>
               println(s"${t.getClass}: ${t.getMessage}")
           }
+
       } else {
         val duration = (System.currentTimeMillis() - startTime) / 1000.0
         println(s"waiting for response for $duration seconds")
       }
 
-      // This should match the idle-timeout for the connection pool. To reproduce making the
-      // idle-timeout slightly smaller seems to help
       Thread.sleep(2000L)
     }
   }
